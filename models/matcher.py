@@ -67,15 +67,40 @@ class HungarianMatcher(nn.Module):
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
         cost_class = -out_prob[:, tgt_ids]
 
+        # print()
+
+        # print("out_bbox[67] :", out_bbox[67])
+        # print("out_bbox[95] :", out_bbox[95])
+        # print("tgt_bbox :", tgt_bbox)
+        
+        # print()
+        
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        
+        # print("cost_bbox[67] :", cost_bbox[67][-1])
+        # print("cost_class[67] :", cost_class[67][-1])
+        # print("cost_giou[67] :", cost_giou[67][-1])
+        
+        # print()
+        
+        # print("cost_bbox[95] :", cost_bbox[95][-1])
+        # print("cost_class[95] :", cost_class[95][-1])
+        # print("cost_giou[95] :", cost_giou[95][-1])
+        
+        # print()
 
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1).cpu()
+        
+        # print("C[48] :", C[0][48])
+        # print("C[59] :", C[0][59])
+        # print("C[67] :", C[0][67])
+        # print("C[95] :", C[0][95])
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]

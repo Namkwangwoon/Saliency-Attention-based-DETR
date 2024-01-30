@@ -69,6 +69,9 @@ def hflip(image, target):
 
     if "masks" in target:
         target['masks'] = target['masks'].flip(-1)
+        
+    if "final_mask" in target:
+        target['final_mask'] = target['final_mask'].flip(-1)
 
     return flipped_image, target
 
@@ -128,6 +131,12 @@ def resize(image, target, size, max_size=None):
     if "masks" in target:
         target['masks'] = interpolate(
             target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
+        
+    if "final_mask" in target:
+        final_mask = target['final_mask']
+        target['final_mask'] = interpolate(
+            final_mask[:, None].float(), size, mode="nearest")[:, 0] > 0.5
+        
 
     return rescaled_image, target
 
@@ -197,6 +206,15 @@ class RandomResize(object):
     def __call__(self, img, target=None):
         size = random.choice(self.sizes)
         return resize(img, target, size, self.max_size)
+
+
+class Resize(object):
+    def __init__(self, sizes):
+        assert isinstance(sizes, (list, tuple))
+        self.sizes = sizes
+
+    def __call__(self, img, target=None):
+        return resize(img, target, self.sizes, self.sizes)
 
 
 class RandomPad(object):

@@ -2,6 +2,8 @@
 """
 This file provides the definition of the convolutional heads used to predict masks, as well as the losses
 """
+# from bz2 import BZ2Compressor
+from gc import freeze
 import io
 from collections import defaultdict
 from typing import List, Optional
@@ -21,18 +23,41 @@ except ImportError:
     pass
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+import cv2
+
+
 class DETRsegm(nn.Module):
     def __init__(self, detr, freeze_detr=False):
         super().__init__()
         self.detr = detr
 
+        # if freeze_detr:
+        #     for p in self.parameters():
+        #         p.requires_grad_(False)
+        
+        ### classification head(+ detection head)를 제외하고 detr을 모두 freeze
         if freeze_detr:
-            for p in self.parameters():
-                p.requires_grad_(False)
+            for name, p in self.named_parameters():
+                if name not in ['detr.class_embed.weight', 'detr.class_embed.bias',
+                                'detr.bbox_embed.layers.0.weight', 'detr.bbox_embed.layers.0.bias',
+                                'detr.bbox_embed.layers.1.weight', 'detr.bbox_embed.layers.1.bias',
+                                'detr.bbox_embed.layers.2.weight', 'detr.bbox_embed.layers.2.bias']:
+                    p.requires_grad_(False)
 
         hidden_dim, nheads = detr.transformer.d_model, detr.transformer.nhead
+        # self.self_attention = MultiheadSelfAttention(hidden_dim, nheads)
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
-        self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
+        
+        ### Salinecy Classification
+        # self.saliency_classification = SalClassNet()
+        ###
+        
+        # self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
+        self.mask_head = MaskHeadSmallConv(hidden_dim * 2, [1024, 512, 256], hidden_dim)
+
+
 
     def forward(self, samples: NestedTensor):
         if isinstance(samples, (list, torch.Tensor)):
@@ -46,19 +71,104 @@ class DETRsegm(nn.Module):
         src_proj = self.detr.input_proj(src)
         hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1])
 
-        outputs_class = self.detr.class_embed(hs)
-        outputs_coord = self.detr.bbox_embed(hs).sigmoid()
+        outputs_class = self.detr.class_embed(hs)               # (6(layers) x 2 x 100 x 92)
+        outputs_coord = self.detr.bbox_embed(hs).sigmoid()      # (6(layers) x 2 x 100 x 4)
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
         if self.detr.aux_loss:
             out['aux_outputs'] = self.detr._set_aux_loss(outputs_class, outputs_coord)
+    
+        ### Add Multi-Head Self-Attention
+        # box_embeddings = self.self_attention(hs[-1])
 
         # FIXME h_boxes takes the last one computed, keep this in mind
-        bbox_mask = self.bbox_attention(hs[-1], memory, mask=mask)
-
+        bbox_mask, attention_value = self.bbox_attention(hs[-1], memory, mask=mask)
+        
+        out['attention_maps'] = bbox_mask
+        # saliency_value = self.saliency_classification(attention_value)
+        
+        # out['saliency_value'] = saliency_value
+        
+                
         seg_masks = self.mask_head(src_proj, bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        
         outputs_seg_masks = seg_masks.view(bs, self.detr.num_queries, seg_masks.shape[-2], seg_masks.shape[-1])
-
+        
+        # output_masks = interpolate(outputs_seg_masks, size=samples.tensors.shape[-2:], mode='bilinear', align_corners=False)
+        # output_masks = output_masks.cpu().detach().numpy()
+        
+        
         out["pred_masks"] = outputs_seg_masks
+        
+        
+        return out
+
+
+class b_DETRsegm(nn.Module):
+    def __init__(self, detr, freeze_detr=False):
+        super().__init__()
+        self.detr = detr
+
+        # if freeze_detr:
+        #     for p in self.parameters():
+        #         p.requires_grad_(False)
+        
+        # classification head(+ detection head)를 제외하고 detr을 모두 freeze
+        if freeze_detr:
+            for name, p in self.named_parameters():
+                if name not in ['detr.class_embed.weight', 'detr.class_embed.bias',
+                                'detr.bbox_embed.layers.0.weight', 'detr.bbox_embed.layers.0.bias',
+                                'detr.bbox_embed.layers.1.weight', 'detr.bbox_embed.layers.1.bias',
+                                'detr.bbox_embed.layers.2.weight', 'detr.bbox_embed.layers.2.bias']:
+                    p.requires_grad_(False)
+
+        hidden_dim, nheads = detr.transformer.d_model, detr.transformer.nhead
+        # self.self_attention = MultiheadSelfAttention(hidden_dim, nheads)
+        self.bbox_attention = b_MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
+        
+        ### Salinecy Classification
+        self.saliency_classification = SalClassNet()
+        ###
+        
+        self.mask_head = MaskHeadSmallConv(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
+
+
+    def forward(self, samples: NestedTensor):
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = self.detr.backbone(samples)
+
+        bs = features[-1].tensors.shape[0]
+
+        src, mask = features[-1].decompose()
+        assert mask is not None
+        src_proj = self.detr.input_proj(src)
+        hs, memory = self.detr.transformer(src_proj, mask, self.detr.query_embed.weight, pos[-1])
+
+        outputs_class = self.detr.class_embed(hs)               # (6(layers) x 2 x 100 x 92)
+        outputs_coord = self.detr.bbox_embed(hs).sigmoid()      # (6(layers) x 2 x 100 x 4)
+        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
+        if self.detr.aux_loss:
+            out['aux_outputs'] = self.detr._set_aux_loss(outputs_class, outputs_coord)
+    
+        ### Add Multi-Head Self-Attention
+        # box_embeddings = self.self_attention(hs[-1])
+
+        # FIXME h_boxes takes the last one computed, keep this in mind
+        # bbox_mask = self.bbox_attention(hs[-1], memory, mask=mask)
+        bbox_mask, attention_value = self.bbox_attention(hs[-1], memory, mask=mask)
+        
+        out['attention_maps'] = bbox_mask
+        saliency_value = self.saliency_classification(attention_value)
+        
+        out['saliency_value'] = saliency_value
+        
+                
+        seg_masks = self.mask_head(src_proj, bbox_mask, [features[2].tensors, features[1].tensors, features[0].tensors])
+        
+        outputs_seg_masks = seg_masks.view(bs, self.detr.num_queries, seg_masks.shape[-2], seg_masks.shape[-1])
+        
+        out["pred_masks"] = outputs_seg_masks
+        # out["pred_masks"] = output.squeeze(1)
         return out
 
 
@@ -148,6 +258,86 @@ class MHAttentionMap(nn.Module):
 
         self.q_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
         self.k_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
+        self.v_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
+
+        nn.init.zeros_(self.k_linear.bias)
+        nn.init.zeros_(self.q_linear.bias)
+        nn.init.zeros_(self.v_linear.bias)
+        nn.init.xavier_uniform_(self.k_linear.weight)
+        nn.init.xavier_uniform_(self.q_linear.weight)
+        nn.init.xavier_uniform_(self.v_linear.weight)
+        self.normalize_fact = float(hidden_dim / self.num_heads) ** -0.5
+
+    def forward(self, q, k, mask: Optional[Tensor] = None):
+        q = self.q_linear(q)
+        k = F.conv2d(k, self.k_linear.weight.unsqueeze(-1).unsqueeze(-1), self.k_linear.bias)
+        v = F.conv2d(k, self.v_linear.weight.unsqueeze(-1).unsqueeze(-1), self.v_linear.bias)
+        # print()
+        # print("k_linear : ", self.k_linear.weight.shape)
+        # print("k weight : ", self.k_linear.weight.unsqueeze(-1).unsqueeze(-1).shape)
+        # print("k : ", k.shape)
+        # print()
+        qh = q.view(q.shape[0], q.shape[1], self.num_heads, self.hidden_dim // self.num_heads)
+        kh = k.view(k.shape[0], self.num_heads, self.hidden_dim // self.num_heads, k.shape[-2], k.shape[-1])
+        vh = v.view(v.shape[0], self.num_heads, self.hidden_dim // self.num_heads, v.shape[-2], v.shape[-1])
+        # print()
+        # print("qh : ", qh.shape)
+        # print("kh : ", kh.shape)
+        # print()
+        weights = torch.einsum("bqnc,bnchw->bqnhw", qh * self.normalize_fact, kh)
+        # weights = torch.einsum("bqnc,bnchw->bqnchw", qh * self.normalize_fact, kh)
+
+        # print()
+        # print("weights_1 :", weights.shape)
+        # print()
+        
+        if mask is not None:
+            weights.masked_fill_(mask.unsqueeze(1).unsqueeze(1), float("-inf"))
+            # weights.masked_fill_(mask.unsqueeze(1).unsqueeze(1).unsqueeze(1), float("-inf"))
+        weights = F.softmax(weights.flatten(2), dim=-1).view(weights.size())
+        
+        # print()
+        # print("weights_2 :", weights.shape)
+        # print()
+        
+        ## K * V
+        weights = torch.einsum("bqnhw,bnchw->bqnchw", weights, vh)
+        
+        # print()
+        # print("weights_2_1 :", weights.shape)
+        # print()
+        
+        ''' (256 * 2) channel ''' 
+        weights = self.dropout(weights)
+        weights = weights.reshape(weights.shape[0], weights.shape[1], -1, weights.shape[-2], weights.shape[-1])
+        
+        attention_values = weights.sum(-1).sum(-1)
+        ''''''
+        
+        ''' head!!'''
+        # weights = self.dropout(weights)
+        # attention_values = weights.reshape(weights.shape[0], weights.shape[1], -1, weights.shape[-2], weights.shape[-1])
+        # attention_values = attention_values.sum(-1).sum(-1)
+        # weights = weights.sum(-3)
+        ''''''
+        
+        # print()
+        # print("weights_3 : ", weights.shape)
+        # print()
+        
+        return weights, attention_values
+
+class b_MHAttentionMap(nn.Module):
+    """This is a 2D attention module, which only returns the attention softmax (no multiplication by value)"""
+
+    def __init__(self, query_dim, hidden_dim, num_heads, dropout=0.0, bias=True):
+        super().__init__()
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.dropout = nn.Dropout(dropout)
+
+        self.q_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
+        self.k_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
 
         nn.init.zeros_(self.k_linear.bias)
         nn.init.zeros_(self.q_linear.bias)
@@ -166,8 +356,22 @@ class MHAttentionMap(nn.Module):
             weights.masked_fill_(mask.unsqueeze(1).unsqueeze(1), float("-inf"))
         weights = F.softmax(weights.flatten(2), dim=-1).view(weights.size())
         weights = self.dropout(weights)
-        return weights
+        
+        
+        values = torch.einsum("bqnc,bnchw->bqnchw", qh * self.normalize_fact, kh)
+        
 
+        if mask is not None:
+            values.masked_fill_(mask.unsqueeze(1).unsqueeze(1).unsqueeze(1), float("-inf"))
+        values = F.softmax(values.flatten(2), dim=-1).view(values.size())
+        values = self.dropout(values)
+        
+        values = values.reshape(values.shape[0], values.shape[1], -1, values.shape[-2], values.shape[-1])
+        
+        values = values.sum(-1).sum(-1)
+        
+        
+        return weights, values
 
 def dice_loss(inputs, targets, num_boxes):
     """
@@ -361,3 +565,39 @@ class PostProcessPanoptic(nn.Module):
                 predictions = {"png_string": out.getvalue(), "segments_info": segments_info}
             preds.append(predictions)
         return preds
+
+
+class SalClassNet(nn.Module):
+    def __init__(self, ):
+        super().__init__()
+        
+        self.lay1 = nn.Linear(256, 256)
+        self.bn1 = nn.BatchNorm1d(256)
+        self.relu1 = nn.ReLU()
+        
+        self.lay2 = nn.Linear(256, 128)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.relu2 = nn.ReLU()
+        
+        self.lay3 = nn.Linear(128, 1)
+        self.sig3 = nn.Sigmoid()
+        
+        
+    def forward(self, x):
+        x = self.lay1(x)
+        x = x.permute(0, -1, 1)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        
+        x = x.permute(0, -1, 1)
+        x = self.lay2(x)
+        x = x.permute(0, -1, 1)
+        x = self.bn2(x)
+        x = self.relu2(x)
+        
+        
+        x = x.permute(0, -1, 1)
+        x = self.lay3(x)
+        x = self.sig3(x)
+        
+        return x

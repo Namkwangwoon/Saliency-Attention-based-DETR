@@ -14,9 +14,12 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
-                           dice_loss, sigmoid_focal_loss)
+                           dice_loss, sigmoid_focal_loss, b_DETRsegm)
 from .transformer import build_transformer
 
+import matplotlib.pyplot as plt
+
+from torchvision.ops.focal_loss import sigmoid_focal_loss as focal_loss
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
@@ -149,9 +152,7 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
@@ -180,15 +181,68 @@ class SetCriterion(nn.Module):
         # upsample predictions to the target size
         src_masks = interpolate(src_masks[:, None], size=target_masks.shape[-2:],
                                 mode="bilinear", align_corners=False)
+        # n = len(target_masks)
+        # print(src_idx)
+        # print(tgt_idx)
+        # for i in range(n):
+            
+        #     plt.subplot(n, 2, 2*i+1)
+        #     plt.axis('off')
+        #     plt.imshow(src_masks[:,0][i].cpu().detach().numpy(), cmap='gray')
+            
+        #     plt.subplot(n, 2, 2*i+2)
+        #     plt.axis('off')
+        #     plt.imshow(target_masks[i].cpu().detach().numpy(), cmap='gray')
+        
+        #     s, t = src_masks[:,0][i], target_masks[i]
+        #     print()
+        #     print("s :", s.min(), "~", s.max())
+        #     print("t :", t.min(), "~", t.max())
+        #     print()
+            
+        # plt.show()
+            
+        # src_masks = outputs['pred_masks']
+        # target_masks = torch.cat([targets[0]['masks'], targets[1]['masks']])
+        # src_masks = interpolate(src_masks[:, None].type(torch.float), size=target_masks.shape[-2:],
+        #                         mode="bilinear", align_corners=False)
+        
+        # for s, t, in zip(src_masks[:, 0], target_masks):
+        #     plt.subplot(1, 2, 1)
+        #     plt.axis('off')
+        #     plt.imshow(s.cpu().detach().numpy()>0.5, cmap='gray')
+            
+        #     plt.subplot(1, 2, 2)
+        #     plt.axis('off')
+        #     plt.imshow(t.cpu().detach().numpy(), cmap='gray')
+            
+        #     plt.show()
+        
         src_masks = src_masks[:, 0].flatten(1)
 
         target_masks = target_masks.flatten(1)
         target_masks = target_masks.view(src_masks.shape)
         losses = {
             "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
+            # "loss_mask" : F.binary_cross_entropy(src_masks.sigmoid(), target_masks)/num_boxes,
             "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
         }
         return losses
+    
+    def loss_saliency(self, outputs, targets, indices, num_boxes):
+        src_sal_score = outputs['saliency_value'].reshape(-1, 100)
+        tgt_sal_score = []
+        
+        for ind in indices:
+            tgt_sal_score.append(F.one_hot(ind[0], num_classes=100).sum(0))
+        tgt_sal_score = torch.cat(tgt_sal_score, dim=0).reshape(-1, 100).type(torch.FloatTensor).cuda()
+        
+        losses = {
+            "loss_saliency" : F.binary_cross_entropy(src_sal_score, tgt_sal_score)
+        }
+        
+        return losses
+        
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -207,7 +261,8 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
-            'masks': self.loss_masks
+            'masks': self.loss_masks,
+            # 'saliency' : self.loss_saliency
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -279,7 +334,7 @@ class PostProcess(nn.Module):
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
-        boxes = boxes * scale_fct[:, None, :]
+        boxes = boxes * scale_fct[:, None, :].cuda()
 
         results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
 
@@ -328,14 +383,24 @@ def build(args):
         num_queries=args.num_queries,
         aux_loss=args.aux_loss,
     )
+    # b_model = DETR(
+    #     backbone,
+    #     transformer,
+    #     num_classes=num_classes,
+    #     num_queries=args.num_queries,
+    #     aux_loss=args.aux_loss,
+    # )
     if args.masks:
-        model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
+        # model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
+        model = b_DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
+        # b_model = b_DETRsegm(b_model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': 1, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
+        # weight_dict["loss_saliency"] = 0.02
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -346,6 +411,7 @@ def build(args):
     losses = ['labels', 'boxes', 'cardinality']
     if args.masks:
         losses += ["masks"]
+        # losses += ["masks", 'saliency']
     criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
                              eos_coef=args.eos_coef, losses=losses)
     criterion.to(device)
