@@ -5,7 +5,7 @@
 ![SA-DETR_architecture](https://github.com/Namkwangwoon/Saliency-Attention-based-DETR/assets/19163372/3c340a4b-077e-4fc6-8fc1-ae33c55deb35)
 
 # Prerequisite
-- PyTorch
+- PyTorch >=1.5.0
 - Requirements
   ```shell
   pip install -r requirements.txt
@@ -25,3 +25,5 @@
 
 
 # Reference Codes
+- https://github.com/facebookresearch/detr
+- https://github.com/mczhuge/SOCToolbox
