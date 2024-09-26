@@ -1,5 +1,5 @@
 # Saliency Attention-based DETR
-"SA-DETR: Saliency Attention-based DETR for Salienct Object Detection"
+"SA-DETR: Saliency Attention-based DETR for Salient Object Detection"
 
 
 # Overall Architecture
