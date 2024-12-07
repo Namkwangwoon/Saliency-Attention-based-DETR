@@ -1,6 +1,7 @@
 # Saliency Attention-based DETR
 "SA-DETR: Saliency Attention-based DETR for Salient Object Detection"
-https://link.springer.com/article/10.1007/s10044-024-01379-5
+
+Paper : https://link.springer.com/article/10.1007/s10044-024-01379-5
 
 
 # Overall Architecture
