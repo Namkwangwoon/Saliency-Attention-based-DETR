@@ -1,5 +1,5 @@
 # Saliency Attention-based DETR
-"SA-DETR: Saliency Attention-based DETR for Salient Object Detection"
+> **Nam, Kwangwoon**, et al. "SA-DETR: Saliency Attention-based DETR for salient object detection." *Pattern Analysis and Applications* 28.1 (2025): 1-11.
 
 Paper : https://link.springer.com/article/10.1007/s10044-024-01379-5
 
