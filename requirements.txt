@@ -8,3 +8,4 @@ scipy
 onnx
 onnxruntime
 imantics
+tqdm
